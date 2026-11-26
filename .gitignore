@@ -1,0 +1,9 @@
+#密钥与私钥
+secrets.env
+*.env
+base-catalog.json
+codex-models.json
+
+#python产物
+__pycache__/
+*.pyc

@@ -1,0 +1,9 @@
+# 被 codex-router.socket 按需拉起；空闲 ROUTER_IDLE_SECONDS 秒后自己退出。不需要 enable。
+[Unit]
+Description=codex-router local model router
+Requires=codex-router.socket
+
+[Service]
+ExecStart=/usr/bin/python3 %h/projects/codex-router/router.py
+EnvironmentFile=%h/.config/codex-router/secrets.env
+Environment=ROUTER_IDLE_SECONDS=900

@@ -1,6 +1,15 @@
 """codex-router: 按模型名把 Codex 的 Responses 请求转发到不同服务商。仅用标准库。"""
 
+import argparse
+import http.client
+import json
+import os
+import sys
+import threading
+import time
 import tomllib
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 # ── 第 1 段：配置 ─────────────────────────────────────────
@@ -95,3 +104,149 @@ def prepare_headers(incoming, api_key):
     headers = {k: v for k, v in incoming.items() if k.lower() not in DROPPED_HEADERS}
     headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def upstream_target(base_url, request_path):
+    """把本地路径映射到上游：/v1/responses + https://x.com → (https, x.com, /responses)。
+
+    本地统一以 /v1 开头；上游的版本前缀由 base_url 自己决定（DeepSeek 没有 /v1）。
+    """
+    url = urllib.parse.urlsplit(base_url)
+    suffix = request_path.removeprefix("/v1")
+    return url.scheme, url.netloc, url.path.rstrip("/") + suffix
+
+
+# ── 第 3 段：转发 ────────────────────────────────────────
+
+UPSTREAM_TIMEOUT = 600  # 秒；推理模型可能长时间不吐字
+RESPONSE_SKIPPED_HEADERS = DROPPED_HEADERS - {"authorization", "accept-encoding"}
+
+
+class Handler(BaseHTTPRequestHandler):
+    """每个请求一个线程。HTTP/1.0：响应结束即关闭连接，流式输出天然以断开为结尾。"""
+
+    server_version = "codex-router"
+
+    def do_GET(self):
+        if self.path == "/healthz":
+            self.send_json(200, {"status": "ok"})
+        else:
+            self.send_error_json(404, f"unknown path {self.path}")
+
+    def do_POST(self):
+        started = time.monotonic()
+        self.server.request_started()
+        try:
+            self.forward(started)
+        finally:
+            self.server.request_finished()
+
+    def forward(self, started):
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except ValueError:
+            return self.send_error_json(400, "request body is not valid JSON")
+
+        model = body.get("model", "")
+        name, provider, efforts = resolve(self.server.config, model)
+        api_key = os.environ.get(provider["key_env"])
+        if not api_key:
+            return self.send_error_json(500, f"environment variable {provider['key_env']} is not set")
+
+        scheme, host, path = upstream_target(provider["base_url"], self.path)
+        payload = json.dumps(prepare_body(body, efforts)).encode()
+        conn_class = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        conn = conn_class(host, timeout=UPSTREAM_TIMEOUT)
+        try:
+            conn.request("POST", path, payload, prepare_headers(self.headers, api_key))
+            upstream = conn.getresponse()
+            self.relay(upstream)
+            status = upstream.status
+        except OSError as e:  # 连不上、超时、TLS 失败……
+            self.send_error_json(502, f"upstream {name} unreachable: {e.__class__.__name__}")
+            status = 502
+        finally:
+            conn.close()
+        log(f"{model or '?'} -> {name} {status} {time.monotonic() - started:.1f}s")
+
+    def relay(self, upstream):
+        """把上游响应原样写回：状态码、响应头、正文逐块透传（SSE 不会被攒成一大块）。"""
+        self.send_response_only(upstream.status, upstream.reason)
+        for key, value in upstream.getheaders():
+            if key.lower() not in RESPONSE_SKIPPED_HEADERS:
+                self.send_header(key, value)
+        self.end_headers()
+        try:
+            while chunk := upstream.read1(65536):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 用户在 ChatGPT 里点了停止，客户端先断开了
+
+    def send_json(self, status, obj):
+        data = json.dumps(obj).encode()
+        self.send_response_only(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_error_json(self, status, message):
+        """用 OpenAI 的错误格式返回，ChatGPT 界面能直接显示原因。"""
+        log(f"error {status}: {message}")
+        self.send_json(status, {"error": {"message": f"[codex-router] {message}",
+                                          "type": "router_error"}})
+
+    def log_message(self, format, *args):
+        pass  # 关掉默认的访问日志：我们自己每个请求打一行，且绝不打印请求头和请求体
+
+
+def log(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+class RouterServer(ThreadingHTTPServer):
+    """在标准服务器上加两样东西：配置，以及“进行中请求数”（第 4 段用它判断空闲）。"""
+
+    daemon_threads = True
+
+    def __init__(self, address, config, bind_and_activate=True):
+        super().__init__(address, Handler, bind_and_activate)
+        self.config = config
+        self.active = 0
+        self.last_active = time.monotonic()
+        self.lock = threading.Lock()
+
+    def request_started(self):
+        with self.lock:
+            self.active += 1
+
+    def request_finished(self):
+        with self.lock:
+            self.active -= 1
+            self.last_active = time.monotonic()
+
+
+# ── 第 4 段：生命周期 ─────────────────────────────────────
+
+DEFAULT_CONFIG = os.path.expanduser("~/.config/codex-router/models.toml")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=DEFAULT_CONFIG)
+    parser.add_argument("--port", type=int, default=4000)
+    args = parser.parse_args()
+
+    server = RouterServer(("127.0.0.1", args.port), load_config(args.config))
+    log(f"listening on 127.0.0.1:{args.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

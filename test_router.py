@@ -1,8 +1,12 @@
 """router.py 纯函数的单元测试。运行：python3 -m unittest -v"""
 
+import http.client
+import json
 import os
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import router
 
@@ -112,6 +116,91 @@ class PrepareHeadersTest(unittest.TestCase):
             "Content-Type": "application/json",
             "Authorization": "Bearer upstream-key",
         })
+
+
+class UpstreamTargetTest(unittest.TestCase):
+    def test_base_url_with_v1(self):
+        self.assertEqual(router.upstream_target("https://www.egpt.fun/v1", "/v1/responses"),
+                         ("https", "www.egpt.fun", "/v1/responses"))
+
+    def test_base_url_without_v1(self):
+        self.assertEqual(router.upstream_target("https://api.deepseek.com", "/v1/responses"),
+                         ("https", "api.deepseek.com", "/responses"))
+
+
+class FakeUpstream(BaseHTTPRequestHandler):
+    """假的上游服务商：记下收到的请求，然后分 3 块流式返回。"""
+
+    def do_POST(self):
+        self.server.seen = {
+            "path": self.path,
+            "auth": self.headers.get("Authorization"),
+            "body": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for i in range(3):
+            self.wfile.write(f"data: chunk{i}\n\n".encode())
+            self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
+
+
+class ProxyTest(unittest.TestCase):
+    """端到端：客户端 → router → 假上游，全程只在本机，不联网。"""
+
+    def setUp(self):
+        self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeUpstream)
+        threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
+        up_port = self.upstream.server_address[1]
+        path = write_toml(
+            'default_provider = "fake"\n'
+            f'[providers.fake]\nbase_url = "http://127.0.0.1:{up_port}/api"\nkey_env = "FAKE_KEY"\n'
+            '[providers.down]\nbase_url = "http://127.0.0.1:1"\nkey_env = "FAKE_KEY"\n'
+            '[models.small]\nprovider = "fake"\nefforts = ["low", "high"]\n'
+            '[models.broken]\nprovider = "down"\nefforts = ["low"]\n')
+        self.addCleanup(os.remove, path)
+        self.router = router.RouterServer(("127.0.0.1", 0), router.load_config(path))
+        threading.Thread(target=self.router.serve_forever, daemon=True).start()
+        os.environ["FAKE_KEY"] = "upstream-secret"
+
+    def tearDown(self):
+        for server in (self.router, self.upstream):
+            server.shutdown()
+            server.server_close()
+        os.environ.pop("FAKE_KEY", None)
+
+    def post(self, body):
+        conn = http.client.HTTPConnection("127.0.0.1", self.router.server_address[1])
+        conn.request("POST", "/v1/responses", json.dumps(body),
+                     {"Authorization": "Bearer dummy", "Content-Type": "application/json"})
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode()
+
+    def test_forwards_and_streams(self):
+        status, text = self.post({"model": "small", "reasoning": {"effort": "xhigh"}})
+        self.assertEqual(status, 200)
+        self.assertEqual(text, "data: chunk0\n\ndata: chunk1\n\ndata: chunk2\n\n")
+        seen = self.upstream.seen
+        self.assertEqual(seen["path"], "/api/responses")
+        self.assertEqual(seen["auth"], "Bearer upstream-secret")
+        self.assertEqual(seen["body"]["reasoning"]["effort"], "high")
+
+    def test_missing_key_returns_openai_style_error(self):
+        os.environ.pop("FAKE_KEY")
+        status, text = self.post({"model": "small"})
+        self.assertEqual(status, 500)
+        self.assertIn("FAKE_KEY", json.loads(text)["error"]["message"])
+
+    def test_unreachable_upstream_returns_502(self):
+        status, _ = self.post({"model": "broken"})
+        self.assertEqual(status, 502)
+
+    def test_active_counter_returns_to_zero(self):
+        self.post({"model": "small"})
+        self.assertEqual(self.router.active, 0)
 
 
 if __name__ == "__main__":

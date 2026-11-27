@@ -8,6 +8,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import build_catalog
 import router
 
 EXAMPLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.example.toml")
@@ -201,6 +202,35 @@ class ProxyTest(unittest.TestCase):
     def test_active_counter_returns_to_zero(self):
         self.post({"model": "small"})
         self.assertEqual(self.router.active, 0)
+
+
+class BuildCatalogTest(unittest.TestCase):
+    BASE = {"models": [{
+        "slug": "gpt-x", "display_name": "GPT-X", "apply_patch_tool_type": "freeform",
+        "base_instructions": "You are Codex, an agent based on GPT-6.",
+        "supported_reasoning_levels": [{"effort": "low", "description": "fast"},
+                                       {"effort": "xhigh", "description": "deep"}],
+    }]}
+
+    def setUp(self):
+        self.catalog = build_catalog.build_catalog(router.load_config(EXAMPLE), self.BASE)
+        self.glm = next(m for m in self.catalog["models"] if m["slug"] == "glm-5.4")
+
+    def test_keeps_base_and_appends_models(self):
+        slugs = [m["slug"] for m in self.catalog["models"]]
+        self.assertEqual(slugs[0], "gpt-x")
+        self.assertIn("deepseek-v4-pro", slugs)
+
+    def test_entry_fields(self):
+        self.assertEqual(self.glm["display_name"], "GLM-5.4")
+        self.assertEqual(self.glm["apply_patch_tool_type"], "function")
+        self.assertEqual([lv["effort"] for lv in self.glm["supported_reasoning_levels"]],
+                         ["low", "medium", "high"])
+        self.assertEqual(self.glm["default_reasoning_level"], "medium")
+        self.assertIn("based on GLM-5.4", self.glm["base_instructions"])
+
+    def test_template_not_modified(self):
+        self.assertEqual(self.BASE["models"][0]["apply_patch_tool_type"], "freeform")
 
 
 if __name__ == "__main__":

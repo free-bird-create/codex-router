@@ -15,7 +15,6 @@ CONFIG_DIR = os.path.expanduser("~/.config/codex-router")
 
 # 非 OpenAI 模型统一关掉 OpenAI 专有的能力，避免 Codex 发出对方不认识的参数或工具
 NON_OPENAI_OVERRIDES = {
-    "apply_patch_tool_type": "function",   # freeform 是 OpenAI 专有的自定义工具格式
     "supports_search_tool": False,         # 托管的 web_search 工具只有 OpenAI 有
     "use_responses_lite": False,
     "prefer_websockets": False,

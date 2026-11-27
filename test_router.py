@@ -224,6 +224,7 @@ class BuildCatalogTest(unittest.TestCase):
     def test_entry_fields(self):
         self.assertEqual(self.glm["display_name"], "GLM-5.4")
         self.assertFalse(self.glm["supports_search_tool"])
+        self.assertIsNone(self.glm["tool_mode"])
         self.assertEqual([lv["effort"] for lv in self.glm["supported_reasoning_levels"]],
                          ["low", "medium", "high"])
         self.assertEqual(self.glm["default_reasoning_level"], "medium")

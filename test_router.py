@@ -223,7 +223,7 @@ class BuildCatalogTest(unittest.TestCase):
 
     def test_entry_fields(self):
         self.assertEqual(self.glm["display_name"], "GLM-5.4")
-        self.assertEqual(self.glm["apply_patch_tool_type"], "function")
+        self.assertFalse(self.glm["supports_search_tool"])
         self.assertEqual([lv["effort"] for lv in self.glm["supported_reasoning_levels"]],
                          ["low", "medium", "high"])
         self.assertEqual(self.glm["default_reasoning_level"], "medium")

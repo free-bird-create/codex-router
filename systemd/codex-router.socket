@@ -1,0 +1,9 @@
+# 看门的：只占住端口，不运行任何程序。第一个连接到来时才启动 codex-router.service。
+[Unit]
+Description=codex-router listening socket
+
+[Socket]
+ListenStream=127.0.0.1:4000
+
+[Install]
+WantedBy=sockets.target

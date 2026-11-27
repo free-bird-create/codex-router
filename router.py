@@ -4,6 +4,7 @@ import argparse
 import http.client
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -230,16 +231,47 @@ class RouterServer(ThreadingHTTPServer):
 # ── 第 4 段：生命周期 ─────────────────────────────────────
 
 DEFAULT_CONFIG = os.path.expanduser("~/.config/codex-router/models.toml")
+SD_LISTEN_FDS_START = 3  # systemd 约定：交接的第一个套接字是文件描述符 3
+
+
+def systemd_socket():
+    """由 systemd 套接字激活启动时，返回它交过来的监听套接字；否则返回 None。"""
+    if os.environ.get("LISTEN_PID") != str(os.getpid()) or os.environ.get("LISTEN_FDS") != "1":
+        return None
+    return socket.socket(fileno=SD_LISTEN_FDS_START)
+
+
+def idle_watchdog(server, idle_seconds):
+    """没有进行中的请求、且空闲超过 idle_seconds 时，让服务器退出。"""
+    while True:
+        time.sleep(min(idle_seconds, 30))
+        with server.lock:
+            idle = server.active == 0 and time.monotonic() - server.last_active > idle_seconds
+        if idle:
+            log(f"idle for {idle_seconds}s, exiting")
+            server.shutdown()
+            return
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=DEFAULT_CONFIG)
-    parser.add_argument("--port", type=int, default=4000)
+    parser.add_argument("--port", type=int, default=4000, help="手动运行时监听的端口")
+    parser.add_argument("--idle", type=int, default=int(os.environ.get("ROUTER_IDLE_SECONDS", 900)),
+                        help="套接字激活模式下，空闲多少秒后退出")
     args = parser.parse_args()
+    config = load_config(args.config)
 
-    server = RouterServer(("127.0.0.1", args.port), load_config(args.config))
-    log(f"listening on 127.0.0.1:{args.port}")
+    sock = systemd_socket()
+    if sock:  # 按需启动：systemd 已经替我们监听好了端口
+        server = RouterServer(sock.getsockname(), config, bind_and_activate=False)
+        server.socket = sock
+        threading.Thread(target=idle_watchdog, args=(server, args.idle), daemon=True).start()
+    else:     # 手动运行：自己监听，一直运行到 Ctrl+C
+        server = RouterServer(("127.0.0.1", args.port), config)
+    log(f"listening on {server.server_address[0]}:{server.server_address[1]}"
+        + (f" (socket-activated, idle exit {args.idle}s)" if sock else ""))
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

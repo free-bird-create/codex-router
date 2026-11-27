@@ -1,0 +1,37 @@
+default_provider = "egpt"
+
+[providers.egpt]
+base_url = "https://www.egpt.fun/v1"
+key_env  = "EGPT_API_KEY"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+key_env  = "DEEPSEEK_API_KEY"
+
+[providers.glm]
+base_url = "https://open.bigmodel.cn/api/v1"
+key_env  = "GLM_API_KEY"
+
+[models."deepseek-v4-pro"]
+provider       = "deepseek"
+display_name   = "DeepSeek V4 Pro"
+context_window = 128000
+efforts        = ["low", "medium", "high"]
+
+[models."deepseek-flash"]
+provider       = "deepseek"
+display_name   = "DeepSeek V4.1 Flash"
+context_window = 128000
+efforts        = ["low", "medium", "high"]
+
+[models."glm-5.4"]
+provider       = "glm"
+display_name   = "GLM-5.4"
+context_window = 256000
+efforts        = ["low", "medium", "high"]
+
+[models."glm-5.3"]
+provider       = "glm"
+display_name   = "GLM-5.3"
+context_window = 256000
+efforts        = ["low", "medium", "high"]
